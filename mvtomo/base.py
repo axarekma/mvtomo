@@ -57,6 +57,9 @@ class Algorithm(ABC):
         return 0.0
 
     def metric(self, x, oracle):
+        """
+        Default PSNR metric
+        """
         data_range = np.percentile(oracle, 99)
         return peak_signal_noise_ratio(x, oracle, data_range=data_range)
 
@@ -71,7 +74,7 @@ class Algorithm(ABC):
             oracle (array-like, optional): A reference image or volume to compare against for quality assessment.
             If provided, the method tracks the best reconstruction based on the
             specified metric.. Defaults to None.
-            stop_at_best (bool, optional):  If True, stops early when the reconstruction quality declines for 
+            stop_at_best (bool, optional):  If True, stops early when the reconstruction quality declines for
             multiple iterations, returning the best recorded reconstruction.. Defaults to False.
 
         Returns:
