@@ -5,6 +5,8 @@ import numpy as np
 
 from .base import Algorithm, from_numpy
 
+EPSILON = 1e-6
+
 
 class SIRT(Algorithm):
     def __init__(self, x, y, angles, *args, **kwargs):
@@ -12,7 +14,7 @@ class SIRT(Algorithm):
         self.x = x
         self.y = y
         self.angles = angles
-        self.init_paralell(x, y, angles)
+        self.init_projector(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -23,12 +25,12 @@ class SIRT(Algorithm):
         self._residual = torch.ones_like(self._y)
         self._x_dir = torch.ones_like(self._x)
 
-        self.C = self.A.T(torch.ones(self.A.range_shape, device=dev))
-        self.C[self.C < ts.epsilon] = np.Inf
+        self.C = self.A.T(torch.ones(self.y.shape, device=dev))
+        self.C[self.C < EPSILON] = np.Inf
         self.C.reciprocal_()
 
-        self.R = self.A(torch.ones(self.A.domain_shape, device=dev))
-        self.R[self.R < ts.epsilon] = np.Inf
+        self.R = self.A(torch.ones(self.x.shape, device=dev))
+        self.R[self.R < EPSILON] = np.Inf
         self.R.reciprocal_()
 
     def iterate(self):
@@ -56,7 +58,7 @@ class MLEM(Algorithm):
         self.y = y
         self.angles = angles
 
-        self.init_paralell(x, y, angles)
+        self.init_projector(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -66,10 +68,10 @@ class MLEM(Algorithm):
 
         # non-masked ratio had Boundary condition issues
         # that introduced instability in the corners of a  full image
-        y_mask = self.A(torch.ones(self.A.domain_shape, device=dev)) > 0
+        y_mask = self.A(torch.ones(self.x.shape, device=dev)) > 10
         self._y *= y_mask
 
-        self.C = self.A.T(torch.ones_like(self._y)) + ts.epsilon
+        self.C = self.A.T(torch.ones_like(self._y)) + EPSILON
         self.C.reciprocal_()
 
         # containers
@@ -82,7 +84,7 @@ class MLEM(Algorithm):
         curr_residual = torch.square(self._y - self._y_cont).sum().item()
 
         # ratio = y/(y_est+eps)
-        self._y_cont += ts.epsilon
+        self._y_cont += EPSILON
         self._y_cont.reciprocal_()
         self._y_cont *= self._y
 
@@ -107,7 +109,7 @@ class CGNE(Algorithm):
         self.proximal_step = nn_step if nn_step is not None else -1
         self.proximal_counter = 0
 
-        self.init_paralell(x, y, angles)
+        self.init_projector(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -140,8 +142,16 @@ class CGNE(Algorithm):
         self.A(self._p, out=self._q)
         alpha = self.gamma0 / torch.square(self._q).sum()
 
-        self._x += alpha * self._p
         self._r -= alpha * self._q
+        # Doe to numerical instability, this may drift a bit
+        # This means thast both the residual and the conjugate directionis off.
+        # Reset and continue:
+        resnorm = torch.square(self._r).sum().item()
+        if self.loss and resnorm > self.loss[-1]:
+            self.init_conj()
+            return resnorm
+
+        self._x += alpha * self._p
 
         if self.proximal_counter == self.proximal_step:
             self._x = torch.clamp(self._x, min=0)

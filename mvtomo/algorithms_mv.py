@@ -5,6 +5,8 @@ import numpy as np
 
 from .base import Algorithm, from_numpy
 
+EPSILON = 1e-6
+
 
 class MLEM(Algorithm):
     def __init__(self, x, y, angles, *args, **kwargs):
@@ -13,7 +15,7 @@ class MLEM(Algorithm):
         self.y_l = y
         self.angles_l = angles
 
-        self.init_paralell_list(x, y, angles)
+        self.init_projector_list(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -23,12 +25,13 @@ class MLEM(Algorithm):
 
         # non-masked ratio had Boundary condition issues
         # that introduced instability in the corners of a  full image
+        xi = torch.ones(self.x.shape, device=dev)
         for A, y in zip(self.A, self._y_l):
-            y *= A(torch.ones(A.domain_shape, device=dev)) > 0
+            y *= A(xi) > 10
 
         C_temp = [(A.T(torch.ones_like(y))) for A, y in zip(self.A, self._y_l)]
 
-        self.C = torch.stack(C_temp, dim=0).sum(dim=0) + ts.epsilon
+        self.C = torch.stack(C_temp, dim=0).sum(dim=0) + EPSILON
         self.C.reciprocal_()
 
         # containers
@@ -45,9 +48,9 @@ class MLEM(Algorithm):
         for y, y_est in zip(self._y_l, self._y_cont):
             l2_residual += torch.square(y_est - y).sum().item()
 
-        # ratios = [y / (y_est + ts.epsilon) * y_mask for y,y_est,y_mask in zip(self._y_l, y_est_l, self._y_mask_l)]
+        # ratios = [y / (y_est + EPSILON) * y_mask for y,y_est,y_mask in zip(self._y_l, y_est_l, self._y_mask_l)]
         for y_est, y in zip(self._y_cont, self._y_l):
-            y_est += ts.epsilon
+            y_est += EPSILON
             y_est.reciprocal_()
             y_est *= y
 
@@ -71,7 +74,7 @@ class OSEM(Algorithm):
         self.y_l = y
         self.angles_l = angles
 
-        self.init_paralell_list(x, y, angles)
+        self.init_projector_list(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -81,11 +84,12 @@ class OSEM(Algorithm):
 
         # non-masked ratio had Boundary condition issues
         # that introduced instability in the corners of a  full image
+        xi = torch.ones(self.x.shape, device=dev)
         for A, y in zip(self.A, self._y_l):
-            y *= A(torch.ones(A.domain_shape, device=dev)) > 0
+            y *= A(xi) > 10
 
         self.C_l = [
-            (A.T(torch.ones_like(y)) + ts.epsilon).reciprocal_()
+            (A.T(torch.ones_like(y)) + EPSILON).reciprocal_()
             for A, y in zip(self.A, self._y_l)
         ]
 
@@ -99,8 +103,8 @@ class OSEM(Algorithm):
             A(self._x, y_tmp)
             l2_residual += torch.square(y_tmp - y).sum().item()
 
-            # ratio = (y / (y_est + ts.epsilon))
-            y_tmp += ts.epsilon
+            # ratio = (y / (y_est + EPSILON))
+            y_tmp += EPSILON
             y_tmp.reciprocal_()
             y_tmp *= y
 
@@ -127,15 +131,10 @@ class CGNE(Algorithm):
         self.proximal_step = nn_step if nn_step is not None else -1
         self.proximal_counter = 0
 
+        self.init_projector_list(x, y, angles)
+
     def setup(self):
         dev = torch.device("cuda")
-
-        vg = ts.volume(shape=self.x.shape)
-        pg_list = [
-            ts.parallel(angles=angles, shape=y.shape[::2])
-            for y, angles, in zip(self.y_l, self.angles_l)
-        ]
-        self.A_l = [ts.operator(vg, pg) for pg in pg_list]
 
         self._y_l = [torch.from_numpy(y).to(dev) for y in self.y_l]
         self._x = torch.from_numpy(self.x).to(dev)
@@ -143,8 +142,8 @@ class CGNE(Algorithm):
         self.init_conj()
 
     def init_conj(self):
-        self._r = [y - A(self._x) for A, y in zip(self.A_l, self._y_l)]
-        self._s = [A.T(r) for A, r in zip(self.A_l, self._r)]
+        self._r = [y - A(self._x) for A, y in zip(self.A, self._y_l)]
+        self._s = [A.T(r) for A, r in zip(self.A, self._r)]
 
         _s = torch.stack(self._s, dim=0).sum(dim=0)
         self.gamma0 = (_s * _s).sum()
@@ -153,7 +152,7 @@ class CGNE(Algorithm):
     def iterate(self):
         self.proximal_counter += 1
 
-        self._q = [A(self._p) for A in self.A_l]
+        self._q = [A(self._p) for A in self.A]
         q2_sum = sum([(q**2).sum() for q in self._q])
         alpha = self.gamma0 / q2_sum
 
@@ -166,7 +165,7 @@ class CGNE(Algorithm):
             self.proximal_counter = 0
 
         else:
-            self._s = [A.T(r) for A, r in zip(self.A_l, self._r)]
+            self._s = [A.T(r) for A, r in zip(self.A, self._r)]
             _s = torch.stack(self._s, dim=0).sum(dim=0)
             gamma = (_s * _s).sum()
             beta = gamma / self.gamma0
@@ -191,7 +190,7 @@ class CGNE2(Algorithm):
         self.proximal_step = nn_step if nn_step is not None else -1
         self.proximal_counter = 0
 
-        self.init_paralell_list(x, y, angles)
+        self.init_projector_list(x, y, angles)
 
     def setup(self):
         dev = torch.device("cuda")
@@ -259,72 +258,3 @@ class CGNE2(Algorithm):
 
         self.x = self._x.detach().cpu().numpy().squeeze()
         return sum([torch.square(r).sum() for r in self._r]).item()
-
-
-class CGNE_astra(Algorithm):
-    """Conjugate Gradient Normal Equations (CGNE) implementation."""
-
-    def __init__(self, x, y, angles, nn_step=3, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.x = x
-        self.y = y
-        self.angles = angles
-        self.gamma0 = 0
-
-        self.proximal_step = nn_step if nn_step is not None else -1
-        self.proximal_counter = 0
-
-    def setup(self):
-
-        n_slices, n_rows, n_cols = self.x.shape
-        vol_geom = astra.create_vol_geom(n_rows, n_cols, n_slices)
-        height, _, width = self.y.shape
-        proj_geom1 = astra.create_proj_geom(
-            "parallel3d", 1, 1, height, width, self.angles
-        )
-
-        def A(x):
-            id_, _y = astra.create_sino3d_gpu(x, proj_geom1, vol_geom)
-            # _y1 = ndi.gaussian_filter(_y1, (sigma1,0,sigma1), mode = 'nearest')
-            astra.data3d.delete(id_)
-            return _y
-
-        def AT(y):
-            id_, vol = astra.create_backprojection3d_gpu(y, proj_geom1, vol_geom)
-            astra.data3d.delete(id_)
-            return vol
-
-        setattr(self, "A", A)
-        setattr(self, "AT", AT)
-
-        self.init_conj()
-
-    def init_conj(self):
-        self._r = self.y - self.A(self.x)
-        self._s = self.AT(self._r)
-        self.gamma0 = (self._s * self._s).sum()
-        self._p = 1.0 * self._s
-
-    def iterate(self):
-        self.proximal_counter += 1
-
-        self._q = self.A(self._p)
-        alpha = self.gamma0 / (self._q * self._q).sum()
-
-        self.x += alpha * self._p
-        self._r -= alpha * self._q
-
-        if self.proximal_counter == self.proximal_step:
-            self.x = np.maximum(self.x, 0)
-            self.init_conj()
-            self.proximal_counter = 0
-
-        else:
-            self._s = self.AT(self._r)
-            gamma = (self._s * self._s).sum()
-            beta = gamma / self.gamma0
-
-            self.gamma0 = gamma
-            self._p = self._s + beta * self._p  # Corrected update
-
-        return (self._r**2).sum().item()

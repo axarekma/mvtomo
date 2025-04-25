@@ -5,6 +5,60 @@ from tqdm.auto import trange
 import tomosipo as ts
 import torch
 
+import ncxtutils
+from .voxproj import VoxelOperator
+
+
+def factory_tomosipo():
+    def func(x, y, angles):
+        vg = ts.volume(shape=x.shape)
+        pg = ts.parallel(angles=angles, shape=y.shape[::2])
+        return ts.operator(vg, pg)
+
+    return func
+
+
+def factory_voxelproj(z_order):
+    def func(x, y, angles):
+
+        return VoxelOperator(angles, z_order=z_order, x_shape=x.shape, y_shape=y.shape)
+
+    return func
+
+
+initfunc = {
+    "tomosipo": factory_tomosipo,
+    "voxelproj": factory_voxelproj,
+}
+
+
+class Operator:
+    def __init__(self):
+        self.projfactory = None
+
+    def set(self, name, **kwargs):
+        assert (
+            name in initfunc
+        ), f"Name {name} not in available initializers {list(initfunc.keys())}"
+        self.projfactory = initfunc[name](**kwargs)
+
+    def projector(self, *args, **kwargs):
+        return self.projfactory(*args, **kwargs)
+
+    def init_paralell_list(self, x, y, angles):
+        return [self.projector(x, y, a) for y, a in zip(y, angles)]
+
+
+operator = Operator()
+
+
+def set_backend(name, **kwargs):
+    operator.set(name, **kwargs)
+
+
+def get_operator(*args, **kwargs):
+    return operator.projector(*args, **kwargs)
+
 
 def from_numpy(x, device):
     """
@@ -32,19 +86,11 @@ class Algorithm(ABC):
         self.loss = []
         self.A = None
 
-    def init_paralell(self, x, y, angles):
-        vg = ts.volume(shape=x.shape)
-        pg = ts.parallel(angles=angles, shape=y.shape[::2])
-        self.A = ts.operator(vg, pg)
+    def init_projector(self, x, y, angles):
+        self.A = operator.projector(x, y, angles)
 
-    def init_paralell_list(self, x, y, angles):
-        vg = ts.volume(shape=x.shape)
-        pg_list = [
-            ts.parallel(angles=angles, shape=y.shape[::2])
-            for y, angles, in zip(self.y_l, self.angles_l)
-        ]
-        [self.init_paralell(x, y, a) for y, a in zip(y, angles)]
-        self.A = [ts.operator(vg, pg) for pg in pg_list]
+    def init_projector_list(self, x, y, angles):
+        self.A = [operator.projector(x, yi, ai) for yi, ai in zip(y, angles)]
 
     @abstractmethod
     def setup(self):
